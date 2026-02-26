@@ -54,23 +54,21 @@ def get_feishu_connector():
 
 bitable = get_feishu_connector()
 
-# --- 从飞书拉取数据域 ---
-# 订单表（你已经建好并提供了真实的 tbl ID）
+# --- 从飞书拉取数据域 (已填入你的真实表ID) ---
 if 'orders' not in st.session_state:
-    st.session_state.orders = bitable.get_records("tblVMUMfyVcRgxnF", ["订单编号", "客户名称", "产品规格", "订单数量", "已完工数", "承诺交期", "预计发货日", "最晚到料日", "收款情况", "异常说明", "当前状态", "物流公司", "物流运单"])
+    st.session_state.orders = bitable.get_records("tblvMUMfyVcRgxnF", ["订单编号", "客户名称", "产品规格", "订单数量", "已完工数", "承诺交期", "预计发货日", "最晚到料日", "收款情况", "异常说明", "当前状态", "物流公司", "物流运单"])
 
-# 其他表（等你用模板导入飞书后，把飞书生成的 tbl 填进来替换下面的中文）
 if 'materials' not in st.session_state:
-    st.session_state.materials = bitable.get_records("替换为物料表ID", ["物料编码", "物料名称", "采购周期(天)", "最小采购量"])
+    st.session_state.materials = bitable.get_records("tbl5HsYZEDqQiVvM", ["物料编码", "物料名称", "采购周期(天)", "最小采购量"])
     
 if 'inventory' not in st.session_state:
-    st.session_state.inventory = bitable.get_records("替换为库存表ID", ["物料编码", "现存量", "预留量", "安全库存"])
+    st.session_state.inventory = bitable.get_records("tbl69MGcduldUpt9", ["物料编码", "现存量", "预留量", "安全库存"])
 
 if 'products' not in st.session_state:
-    st.session_state.products = bitable.get_records("替换为产品表ID", ["产品规格", "标准日产能", "包装缓冲天数"])
+    st.session_state.products = bitable.get_records("tbl7Ecj7t3FAQ2Cf", ["产品规格", "标准日产能", "包装缓冲天数"])
 
 if 'purchases' not in st.session_state:
-    st.session_state.purchases = bitable.get_records("替换为采购表ID", ["采购单号", "关联订单", "物料编码", "采购数量", "承诺到货日", "实际到货日", "状态"])
+    st.session_state.purchases = bitable.get_records("tblpPk2pb3Hw9xQF", ["采购单号", "关联订单", "物料编码", "采购数量", "承诺到货日", "实际到货日", "状态"])
 
 # BOM 结构 (字典模拟)
 BOM_MASTER = {
@@ -171,7 +169,6 @@ elif menu == "2. 销售与订单":
         with st.form("new_order"):
             c1, c2 = st.columns(2)
             cstm = c1.text_input("客户名称")
-            # 增加对产品表是否为空的容错保护
             prod_list = st.session_state.products["产品规格"].tolist() if not st.session_state.products.empty else []
             prod = c1.selectbox("产品规格", prod_list)
             qty = c2.number_input("数量", min_value=1, step=100)
@@ -351,11 +348,10 @@ elif menu == "⚙️ 基础数据":
 # ==========================================
 st.sidebar.markdown("---")
 st.sidebar.header("🛠️ 数据库初始化工具")
-st.sidebar.info("点击下方按钮下载 Excel 模板，然后去飞书点击左下角的「导入 Excel」，即可一键生成所有剩余数据表。")
+st.sidebar.info("如果飞书里还没有数据，点击下方下载模板，导入飞书即可一键生成测试数据。")
 
 if st.sidebar.button("生成飞书导入模板(Excel)"):
     output = io.BytesIO()
-    # 填入了一些基础测试数据，方便飞书识别字段类型
     df_mat = pd.DataFrame([["MAT-001", "阻燃外壳", 3, 1000], ["MAT-002", "纯铜插针", 5, 5000]], columns=["物料编码", "物料名称", "采购周期(天)", "最小采购量"])
     df_inv = pd.DataFrame([["MAT-001", 5000, 0, 500], ["MAT-002", 10000, 0, 1000]], columns=["物料编码", "现存量", "预留量", "安全库存"])
     df_prod = pd.DataFrame([["漏电保护插头-标准款", 200, 1], ["精密冲压端子-B型", 1000, 1]], columns=["产品规格", "标准日产能", "包装缓冲天数"])
