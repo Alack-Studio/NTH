@@ -2,62 +2,81 @@ import streamlit as st
 import pandas as pd
 import math
 from datetime import date, timedelta
+import requests
+import io
 
 # ==========================================
-# 0. 全局配置与虚拟数据库初始化
+# 飞书多维表格云端连接器
 # ==========================================
-st.set_page_config(page_title="手搓跟单系统(全量版)", page_icon="🏭", layout="wide", initial_sidebar_state="expanded")
+class FeishuBitable:
+    def __init__(self):
+        # 自动读取 Streamlit Cloud 后台设置的 Secrets
+        self.app_id = st.secrets["feishu"]["app_id"]
+        self.app_secret = st.secrets["feishu"]["app_secret"]
+        self.app_token = st.secrets["feishu"]["app_token"]
+        self.token = self._get_token()
 
-# --- 基础数据域 ---
+    def _get_token(self):
+        """获取飞书授权 Token"""
+        url = "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal"
+        res = requests.post(url, json={"app_id": self.app_id, "app_secret": self.app_secret})
+        return res.json().get("tenant_access_token")
+
+    def get_records(self, table_id, default_columns):
+        """从飞书多维表格获取数据并转换为 DataFrame"""
+        # 如果还没填具体的 tbl ID，先返回空表，防止程序崩溃
+        if not table_id.startswith("tbl"):
+            return pd.DataFrame(columns=default_columns)
+            
+        url = f"https://open.feishu.cn/open-apis/bitable/v1/apps/{self.app_token}/tables/{table_id}/records"
+        headers = {"Authorization": f"Bearer {self.token}"}
+        res = requests.get(url, headers=headers)
+        items = res.json().get("data", {}).get("items", [])
+        
+        if items:
+            df = pd.DataFrame([i['fields'] for i in items])
+            # 确保即使飞书里有些列为空，DataFrame 也有这些列
+            for col in default_columns:
+                if col not in df.columns:
+                    df[col] = None
+            return df
+        return pd.DataFrame(columns=default_columns)
+
+# ==========================================
+# 0. 全局配置与飞书数据库初始化
+# ==========================================
+st.set_page_config(page_title="手搓跟单系统(飞书版)", page_icon="🏭", layout="wide", initial_sidebar_state="expanded")
+
+# 缓存连接器，避免频繁请求 Token
+@st.cache_resource(ttl=3600)
+def get_feishu_connector():
+    return FeishuBitable()
+
+bitable = get_feishu_connector()
+
+# --- 从飞书拉取数据域 ---
+# 订单表（你已经建好并提供了真实的 tbl ID）
+if 'orders' not in st.session_state:
+    st.session_state.orders = bitable.get_records("tblVMUMfyVcRgxnF", ["订单编号", "客户名称", "产品规格", "订单数量", "已完工数", "承诺交期", "预计发货日", "最晚到料日", "收款情况", "异常说明", "当前状态", "物流公司", "物流运单"])
+
+# 其他表（等你用模板导入飞书后，把飞书生成的 tbl 填进来替换下面的中文）
 if 'materials' not in st.session_state:
-    st.session_state.materials = pd.DataFrame({
-        "物料编码": ["MAT-001", "MAT-002", "MAT-003", "MAT-004"],
-        "物料名称": ["阻燃外壳", "纯铜插针", "控制芯片", "包装彩盒"],
-        "采购周期(天)": [3, 5, 7, 2],
-        "最小采购量": [1000, 5000, 500, 1000] # 采购基本单位
-    })
-
+    st.session_state.materials = bitable.get_records("替换为物料表ID", ["物料编码", "物料名称", "采购周期(天)", "最小采购量"])
+    
 if 'inventory' not in st.session_state:
-    st.session_state.inventory = pd.DataFrame({
-        "物料编码": ["MAT-001", "MAT-002", "MAT-003", "MAT-004"],
-        "现存量": [5000, 10000, 200, 1000],
-        "预留量": [0, 0, 0, 0],
-        "安全库存": [500, 1000, 100, 200]
-    })
+    st.session_state.inventory = bitable.get_records("替换为库存表ID", ["物料编码", "现存量", "预留量", "安全库存"])
+
+if 'products' not in st.session_state:
+    st.session_state.products = bitable.get_records("替换为产品表ID", ["产品规格", "标准日产能", "包装缓冲天数"])
+
+if 'purchases' not in st.session_state:
+    st.session_state.purchases = bitable.get_records("替换为采购表ID", ["采购单号", "关联订单", "物料编码", "采购数量", "承诺到货日", "实际到货日", "状态"])
 
 # BOM 结构 (字典模拟)
 BOM_MASTER = {
     "漏电保护插头-标准款": {"MAT-001": 1, "MAT-002": 3, "MAT-003": 1, "MAT-004": 1},
-    "精密冲压端子-B型": {"MAT-002": 1, "MAT-004": 0.1} 
+    "精密冲压端子-B型": {"MAT-002": 1, "MAT-004": 0.1}
 }
-
-if 'products' not in st.session_state:
-    st.session_state.products = pd.DataFrame({
-        "产品规格": ["漏电保护插头-标准款", "精密冲压端子-B型"],
-        "标准日产能": [200, 1000],  
-        "包装缓冲天数": [1, 1]       
-    })
-
-# --- 业务单据域 ---
-if 'orders' not in st.session_state:
-    st.session_state.orders = pd.DataFrame({
-        "订单编号": ["ORD-202310-001"],
-        "客户名称": ["华东科技集团"],
-        "产品规格": ["漏电保护插头-标准款"],
-        "订单数量": [1000],
-        "已完工数": [0],
-        "承诺交期": [date.today() + timedelta(days=10)],
-        "预计发货日": [date.today() + timedelta(days=15)], 
-        "最晚到料日": [date.today() + timedelta(days=5)],
-        "收款情况": ["未收款"],
-        "异常说明": ["无"], 
-        "当前状态": ["备料中"], # 状态机：新建 → 备料中 → 可生产 → 生产中 → 待出货 → 已出货
-        "物流公司": [""],
-        "物流运单": [""]
-    })
-
-if 'purchases' not in st.session_state:
-    st.session_state.purchases = pd.DataFrame(columns=["采购单号", "关联订单", "物料编码", "采购数量", "承诺到货日", "实际到货日", "状态"])
 
 # ==========================================
 # 辅助计算函数 (核心大脑)
@@ -70,15 +89,15 @@ def run_mrp(order_id):
     latest_arrival = date.today()
     
     for mat_code, unit_qty in bom.items():
-        req_qty = order["订单数量"] * unit_qty 
+        req_qty = order["订单数量"] * unit_qty
         inv_row = st.session_state.inventory[st.session_state.inventory["物料编码"] == mat_code].iloc[0]
-        avail_qty = inv_row["现存量"] - inv_row["预留量"] - inv_row["安全库存"] 
-        shortage = max(0, req_qty - avail_qty) 
+        avail_qty = inv_row["现存量"] - inv_row["预留量"] - inv_row["安全库存"]
+        shortage = max(0, req_qty - avail_qty)
         
         if shortage > 0:
             mat_info = st.session_state.materials[st.session_state.materials["物料编码"] == mat_code].iloc[0]
             po_qty = max(shortage, mat_info["最小采购量"])
-            arrival_date = date.today() + timedelta(days=int(mat_info["采购周期(天)"])) 
+            arrival_date = date.today() + timedelta(days=int(mat_info["采购周期(天)"]))
             
             if arrival_date > latest_arrival:
                 latest_arrival = arrival_date
@@ -89,7 +108,7 @@ def run_mrp(order_id):
             })
             
             idx = st.session_state.inventory.index[st.session_state.inventory["物料编码"] == mat_code].tolist()[0]
-            st.session_state.inventory.at[idx, "预留量"] += avail_qty 
+            st.session_state.inventory.at[idx, "预留量"] += avail_qty
         else:
             idx = st.session_state.inventory.index[st.session_state.inventory["物料编码"] == mat_code].tolist()[0]
             st.session_state.inventory.at[idx, "预留量"] += req_qty
@@ -105,11 +124,11 @@ def calc_eta(product_name, remaining_qty, start_date):
     """ETA 推算逻辑"""
     if remaining_qty <= 0: return date.today()
     prod_info = st.session_state.products[st.session_state.products["产品规格"] == product_name].iloc[0]
-    prod_days = math.ceil(remaining_qty / prod_info["标准日产能"]) 
-    return start_date + timedelta(days=prod_days + int(prod_info["包装缓冲天数"])) 
+    prod_days = math.ceil(remaining_qty / prod_info["标准日产能"])
+    return start_date + timedelta(days=prod_days + int(prod_info["包装缓冲天数"]))
 
 # ==========================================
-# 系统 UI 与 菜单
+# 系统 UI 与菜单
 # ==========================================
 menu = st.sidebar.radio("核心业务域", ["1. 首页看板", "2. 销售与订单", "3. 计划与采购", "4. 仓储物流", "5. 生产车间", "⚙️ 基础数据"])
 
@@ -123,11 +142,11 @@ if menu == "1. 首页看板":
     col3.metric("在制异常", len(st.session_state.orders[st.session_state.orders["异常说明"] != "无"]))
     col4.metric("待发货", len(st.session_state.orders[st.session_state.orders["当前状态"] == "待出货"]))
     
-    st.subheader("🚨 预警中心") 
+    st.subheader("🚨 预警中心")
     risk_col1, risk_col2 = st.columns(2)
     
     with risk_col1:
-        st.error("**到料超期预警**") 
+        st.error("**到料超期预警**")
         overdue_pos = st.session_state.purchases[(st.session_state.purchases["承诺到货日"] < date.today()) & (st.session_state.purchases["状态"] == "采购中")]
         if not overdue_pos.empty:
             st.dataframe(overdue_pos)
@@ -135,7 +154,7 @@ if menu == "1. 首页看板":
             st.success("暂无超期未到料采购单")
             
     with risk_col2:
-        st.warning("**交期风险预警 (预计发货晚于客户要求)**") 
+        st.warning("**交期风险预警 (预计发货晚于客户要求)**")
         risk_orders = st.session_state.orders[(st.session_state.orders["预计发货日"].notna()) & (st.session_state.orders["预计发货日"] > st.session_state.orders["承诺交期"])]
         if not risk_orders.empty:
             st.dataframe(risk_orders[["订单编号", "客户名称", "承诺交期", "预计发货日"]])
@@ -152,14 +171,16 @@ elif menu == "2. 销售与订单":
         with st.form("new_order"):
             c1, c2 = st.columns(2)
             cstm = c1.text_input("客户名称")
-            prod = c1.selectbox("产品规格", st.session_state.products["产品规格"])
+            # 增加对产品表是否为空的容错保护
+            prod_list = st.session_state.products["产品规格"].tolist() if not st.session_state.products.empty else []
+            prod = c1.selectbox("产品规格", prod_list)
             qty = c2.number_input("数量", min_value=1, step=100)
             ddl = c2.date_input("交期要求")
             if st.form_submit_button("提交订单", type="primary"):
-                oid = f"ORD-{date.today().strftime('%m%d')}-{len(st.session_state.orders)+1:03d}" 
+                oid = f"ORD-{date.today().strftime('%m%d')}-{len(st.session_state.orders)+1:03d}"
                 new_row = pd.DataFrame([{"订单编号": oid, "客户名称": cstm, "产品规格": prod, "订单数量": qty, "已完工数": 0, "承诺交期": ddl, "预计发货日": None, "最晚到料日": None, "收款情况": "未收款", "异常说明": "无", "当前状态": "新建", "物流公司": "", "物流运单": ""}])
                 st.session_state.orders = pd.concat([st.session_state.orders, new_row], ignore_index=True)
-                st.success(f"订单 {oid} 创建成功！")
+                st.success(f"订单 {oid} 创建成功！（暂存于缓存，待加入回写飞书功能）")
 
     with tab2:
         st.subheader("全量订单台账监控")
@@ -170,38 +191,42 @@ elif menu == "2. 销售与订单":
             if row["预计发货日"] > row["承诺交期"]: return "🔴 延期风险"
             return "🟢 正常"
             
-        df_display["交付风险"] = df_display.apply(check_risk, axis=1)
-        cols = ["订单编号", "客户名称", "产品规格", "订单数量", "承诺交期", "预计发货日", "交付风险", "当前状态", "异常说明"]
-        st.dataframe(df_display[cols], use_container_width=True)
+        if not df_display.empty:
+            df_display["交付风险"] = df_display.apply(check_risk, axis=1)
+            cols = ["订单编号", "客户名称", "产品规格", "订单数量", "承诺交期", "预计发货日", "交付风险", "当前状态", "异常说明"]
+            st.dataframe(df_display[cols], use_container_width=True)
+        else:
+            st.info("当前没有订单数据")
 
-    with tab3: 
-        sel_order = st.selectbox("搜索/选择订单", st.session_state.orders["订单编号"])
-        if sel_order:
-            order_data = st.session_state.orders[st.session_state.orders["订单编号"] == sel_order].iloc[0]
-            
-            dt1, dt2, dt3, dt4 = st.tabs(["1. 基本信息", "2. 备料情况", "3. 生产进度", "4. 出货信息"])
-            
-            with dt1: 
-                st.write(f"**客户:** {order_data['客户名称']} | **状态:** {order_data['当前状态']} | **收款:** {order_data['收款情况']}")
-                st.write(f"**产品:** {order_data['产品规格']} | **数量:** {order_data['订单数量']} | **承诺交期:** {order_data['承诺交期']}")
-                if st.button("标记为已收款"):
-                    idx = st.session_state.orders.index[st.session_state.orders["订单编号"] == sel_order].tolist()[0]
-                    st.session_state.orders.at[idx, "收款情况"] = "已收款"
-                    st.rerun()
+    with tab3:
+        if not st.session_state.orders.empty:
+            sel_order = st.selectbox("搜索/选择订单", st.session_state.orders["订单编号"])
+            if sel_order:
+                order_data = st.session_state.orders[st.session_state.orders["订单编号"] == sel_order].iloc[0]
+                
+                dt1, dt2, dt3, dt4 = st.tabs(["1. 基本信息", "2. 备料情况", "3. 生产进度", "4. 出货信息"])
+                
+                with dt1:
+                    st.write(f"**客户:** {order_data['客户名称']} | **状态:** {order_data['当前状态']} | **收款:** {order_data['收款情况']}")
+                    st.write(f"**产品:** {order_data['产品规格']} | **数量:** {order_data['订单数量']} | **承诺交期:** {order_data['承诺交期']}")
+                    if st.button("标记为已收款"):
+                        idx = st.session_state.orders.index[st.session_state.orders["订单编号"] == sel_order].tolist()[0]
+                        st.session_state.orders.at[idx, "收款情况"] = "已收款"
+                        st.rerun()
 
-            with dt2: 
-                st.write(f"**最晚到料日:** {order_data['最晚到料日']}")
-                pos = st.session_state.purchases[st.session_state.purchases["关联订单"] == sel_order]
-                if not pos.empty: st.dataframe(pos[["采购单号", "物料编码", "采购数量", "承诺到货日", "状态"]])
-                else: st.info("暂未生成采购单")
-                
-            with dt3: 
-                st.progress(order_data['已完工数'] / order_data['订单数量'] if order_data['订单数量']>0 else 0)
-                st.write(f"进度: {order_data['已完工数']} / {order_data['订单数量']} | 异常记录: {order_data['异常说明']}")
-                st.write(f"**系统测算 ETA (预计发货日):** {order_data['预计发货日']}")
-                
-            with dt4: 
-                st.write(f"物流公司: {order_data['物流公司']} | 运单号: {order_data['物流运单']}")
+                with dt2:
+                    st.write(f"**最晚到料日:** {order_data['最晚到料日']}")
+                    pos = st.session_state.purchases[st.session_state.purchases["关联订单"] == sel_order]
+                    if not pos.empty: st.dataframe(pos[["采购单号", "物料编码", "采购数量", "承诺到货日", "状态"]])
+                    else: st.info("暂未生成采购单")
+                    
+                with dt3:
+                    st.progress(order_data['已完工数'] / order_data['订单数量'] if order_data['订单数量']>0 else 0)
+                    st.write(f"进度: {order_data['已完工数']} / {order_data['订单数量']} | 异常记录: {order_data['异常说明']}")
+                    st.write(f"**系统测算 ETA (预计发货日):** {order_data['预计发货日']}")
+                    
+                with dt4:
+                    st.write(f"物流公司: {order_data['物流公司']} | 运单号: {order_data['物流运单']}")
 
 # --- 3. 计划与采购 ---
 elif menu == "3. 计划与采购":
@@ -209,7 +234,7 @@ elif menu == "3. 计划与采购":
     
     tab1, tab2 = st.tabs(["🧩 拆BOM与算缺料", "🛒 采购到料跟进"])
     
-    with tab1: 
+    with tab1:
         new_orders = st.session_state.orders[st.session_state.orders["当前状态"] == "新建"]
         if not new_orders.empty:
             sel_mrp = st.selectbox("选择订单运行 MRP 计算", new_orders["订单编号"])
@@ -231,7 +256,7 @@ elif menu == "3. 计划与采购":
         else:
             st.info("无待算订单")
             
-    with tab2: 
+    with tab2:
         po_df = st.session_state.purchases
         st.dataframe(po_df)
         if not po_df.empty:
@@ -245,6 +270,7 @@ elif menu == "3. 计划与采购":
                 qty = st.session_state.purchases.at[idx, "采购数量"]
                 inv_idx = st.session_state.inventory.index[st.session_state.inventory["物料编码"] == mat].tolist()[0]
                 st.session_state.inventory.at[inv_idx, "现存量"] += qty
+            
                 st.success("到料成功，库存已增加！")
 
 # --- 4. 仓储物流 ---
@@ -252,22 +278,25 @@ elif menu == "4. 仓储物流":
     st.header("仓库台账与物流出货")
     
     tab1, tab2 = st.tabs(["📦 库存台账", "🚚 发货登记"])
-    with tab1: 
+    with tab1:
         inv_df = st.session_state.inventory.copy()
-        inv_df["可用量"] = inv_df["现存量"] - inv_df["预留量"] - inv_df["安全库存"] 
-        st.dataframe(inv_df, use_container_width=True)
+        if not inv_df.empty:
+            inv_df["可用量"] = inv_df["现存量"] - inv_df["预留量"] - inv_df["安全库存"]
+            st.dataframe(inv_df, use_container_width=True)
+        else:
+            st.info("暂无库存数据")
         
-    with tab2: 
+    with tab2:
         ship_orders = st.session_state.orders[st.session_state.orders["当前状态"] == "待出货"]
         if not ship_orders.empty:
             ship_id = st.selectbox("选择待发货订单", ship_orders["订单编号"])
             logistics = st.text_input("物流公司")
-            tracking = st.text_input("运单号") 
+            tracking = st.text_input("运单号")
             if st.button("确认发货"):
                 idx = st.session_state.orders.index[st.session_state.orders["订单编号"] == ship_id].tolist()[0]
                 st.session_state.orders.at[idx, "物流公司"] = logistics
                 st.session_state.orders.at[idx, "物流运单"] = tracking
-                st.session_state.orders.at[idx, "当前状态"] = "已出货" 
+                st.session_state.orders.at[idx, "当前状态"] = "已出货"
                 st.success("发货登记成功！")
                 st.rerun()
         else:
@@ -275,7 +304,7 @@ elif menu == "4. 仓储物流":
 
 # --- 5. 生产车间 ---
 elif menu == "5. 生产车间":
-    st.header("车间生产报工与异常记录") 
+    st.header("车间生产报工与异常记录")
     
     prod_orders = st.session_state.orders[st.session_state.orders["当前状态"].isin(["可生产", "生产中"])]
     if not prod_orders.empty:
@@ -284,8 +313,8 @@ elif menu == "5. 生产车间":
         
         st.write(f"当前进度: {order_info['已完工数']} / {order_info['订单数量']}")
         with st.form("prod_report"):
-            add_qty = st.number_input("今日合格产出", min_value=0, step=10) 
-            abnormal = st.selectbox("异常提报", ["无", "停机", "缺料", "设备故障", "质量异常"]) 
+            add_qty = st.number_input("今日合格产出", min_value=0, step=10)
+            abnormal = st.selectbox("异常提报", ["无", "停机", "缺料", "设备故障", "质量异常"])
             
             if st.form_submit_button("提交报工", type="primary"):
                 idx = st.session_state.orders.index[st.session_state.orders["订单编号"] == sel_prod].tolist()[0]
@@ -296,7 +325,7 @@ elif menu == "5. 生产车间":
                 st.session_state.orders.at[idx, "当前状态"] = "生产中"
                 
                 if new_qty >= order_info['订单数量']:
-                    st.session_state.orders.at[idx, "当前状态"] = "待出货" 
+                    st.session_state.orders.at[idx, "当前状态"] = "待出货"
                     st.success("工单已完工，已流转至物流待出货！")
                 else:
                     new_eta = calc_eta(order_info['产品规格'], order_info['订单数量'] - new_qty, date.today())
@@ -309,7 +338,40 @@ elif menu == "5. 生产车间":
 # --- 6. 基础数据 ---
 elif menu == "⚙️ 基础数据":
     st.header("产品档案与产能基准")
-    edited_df = st.data_editor(st.session_state.products, num_rows="dynamic", use_container_width=True)
-    if st.button("保存基础数据变更", type="primary"):
-        st.session_state.products = edited_df
-        st.success("产能基准已更新！")
+    if not st.session_state.products.empty:
+        edited_df = st.data_editor(st.session_state.products, num_rows="dynamic", use_container_width=True)
+        if st.button("保存基础数据变更", type="primary"):
+            st.session_state.products = edited_df
+            st.success("产能基准已更新！（注：当前仅更新网页缓存，尚未写回飞书）")
+    else:
+        st.info("产品表为空，请先从飞书加载数据。")
+
+# ==========================================
+# 🛠️ 开发者工具：一键生成飞书导入模板
+# ==========================================
+st.sidebar.markdown("---")
+st.sidebar.header("🛠️ 数据库初始化工具")
+st.sidebar.info("点击下方按钮下载 Excel 模板，然后去飞书点击左下角的「导入 Excel」，即可一键生成所有剩余数据表。")
+
+if st.sidebar.button("生成飞书导入模板(Excel)"):
+    output = io.BytesIO()
+    # 填入了一些基础测试数据，方便飞书识别字段类型
+    df_mat = pd.DataFrame([["MAT-001", "阻燃外壳", 3, 1000], ["MAT-002", "纯铜插针", 5, 5000]], columns=["物料编码", "物料名称", "采购周期(天)", "最小采购量"])
+    df_inv = pd.DataFrame([["MAT-001", 5000, 0, 500], ["MAT-002", 10000, 0, 1000]], columns=["物料编码", "现存量", "预留量", "安全库存"])
+    df_prod = pd.DataFrame([["漏电保护插头-标准款", 200, 1], ["精密冲压端子-B型", 1000, 1]], columns=["产品规格", "标准日产能", "包装缓冲天数"])
+    df_pur = pd.DataFrame([["PO-001", "ORD-001", "MAT-001", 1000, date.today(), None, "采购中"]], columns=["采购单号", "关联订单", "物料编码", "采购数量", "承诺到货日", "实际到货日", "状态"])
+    
+    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+        df_mat.to_excel(writer, sheet_name="物料表", index=False)
+        df_inv.to_excel(writer, sheet_name="库存表", index=False)
+        df_prod.to_excel(writer, sheet_name="产品表", index=False)
+        df_pur.to_excel(writer, sheet_name="采购表", index=False)
+    
+    output.seek(0)
+    st.sidebar.download_button(
+        label="📥 点击下载模板文件", 
+        data=output, 
+        file_name="手搓跟单系统_飞书导入模板.xlsx", 
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        type="primary"
+    )
